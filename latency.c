@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <string.h>
 #include <errno.h>
 #include <error.h>
@@ -39,6 +40,28 @@
 #include <rtdm/testing.h>
 #include <boilerplate/trace.h>
 #include <xenomai/init.h>
+
+#include "msr.h"
+#include "pmc.h"
+
+//add for extra info
+static bool ignore_extra_sample = true;
+static bool has_pmc_info = false;
+
+#define INFO_BUF_SIZE (128 * 1024U)
+#define INFO_BUF_SIZE_LIMIT  (INFO_BUF_SIZE - 256)
+static char extra_info_buf[INFO_BUF_SIZE];
+static uint32_t	buf_offset = 0;
+
+#define PMC_ON_CPU 1
+
+#define MAX_CHECK_TIME  10000 // ns, 10us by default
+
+static int default_pmc_cpu = PMC_ON_CPU;
+static uint32_t max_time_check = MAX_CHECK_TIME;
+static uint32_t random_sample_count = 0;
+static uint32_t random_sample_interval = 1000; //unit ms
+static uint64_t next_sample_cycle = 0;
 
 pthread_t latency_task, display_task;
 
@@ -91,6 +114,94 @@ int do_histogram = 0, do_stats = 0, finished = 0;
 int bucketsize = 1000;		/* default = 1000ns, -B <size> to override */
 
 #define need_histo() (do_histogram || do_stats || do_gnuplot)
+
+//for extra info sampling
+static void init_extra_sampling(void)
+{
+	if (ignore_extra_sample)
+		return;
+
+	//current set fixed cpu PMC_ON_CPU
+	has_pmc_info = pmc_init();
+	if (!has_pmc_info) {
+		perror("PMU can't count!\n");
+	}
+
+	//start counter
+	if (has_pmc_info) {	
+		pmc_start_counting(default_pmc_cpu);
+		printf("Post PMC build, note: need run PMC script first!\n");
+	}
+
+	buf_offset = 0;
+	
+	//for ramdom sampling
+	if (random_sample_count > 0) {
+		if (test_duration > 0) {
+			long samples_1s = (long long)ONE_BILLION / period_ns;
+			random_sample_interval = (long long)(test_duration * samples_1s) / random_sample_count;
+		}
+	} 
+
+	printf("random_sample_count: %d, interval: %d cycles, max-check: %dns\n", random_sample_count,
+        random_sample_interval, max_time_check);
+}
+
+static void pre_extra_sample(void)
+{
+	if (ignore_extra_sample)
+		return;
+
+	if (has_pmc_info) {
+		pmc_pre_read();
+	}
+}
+
+static void post_extra_sample(uint64_t latency, uint64_t cycles)
+{
+	if (ignore_extra_sample)
+		return;
+
+	if (has_pmc_info) {
+	
+		pmc_post_read();
+
+        //for debug
+        //printf("next: %ld, cycles:%ld\n", next_sample_cycle, cycles);
+
+		//for ramdom sample,  if random sample set, ingore min/max setting
+		if ((random_sample_count > 0) && (next_sample_cycle == cycles) && (buf_offset < INFO_BUF_SIZE_LIMIT)) {
+
+			int size = pmc_dump_delta_info(extra_info_buf + buf_offset, cycles, latency);
+			buf_offset += size;
+			next_sample_cycle += random_sample_interval;
+	
+		} else if ((latency > max_time_check) && (buf_offset < INFO_BUF_SIZE_LIMIT)) {
+
+			int size = pmc_dump_delta_info(extra_info_buf + buf_offset, cycles, latency);
+			buf_offset += size;
+		} 
+	}
+}
+
+static void output_extra_sample(void)
+{
+	if (has_pmc_info) {	
+		pmc_stop_counting(default_pmc_cpu);
+	}
+
+	if (buf_offset >= INFO_BUF_SIZE_LIMIT) {
+		int size = sprintf(extra_info_buf + buf_offset, "\n!too much samples saved, buffer to overflow!!!\n");
+		buf_offset += size;
+	}
+
+	if (buf_offset > 0) {
+		fputs(extra_info_buf, stdout);
+		fputs("\n", stdout);
+	} else {
+        fputs("no extra sampled data\n", stdout);
+    }
+}
 
 static inline void add_histogram(int32_t *histogram, int32_t addval)
 {
@@ -162,6 +273,8 @@ static void *latency(void *cookie)
 			struct timespec now;
 			uint64_t ticks;
 
+			pre_extra_sample();
+		
 			err = read(tfd, &ticks, sizeof(ticks));
 
 			clock_gettime(CLOCK_MONOTONIC, &now);
@@ -198,6 +311,10 @@ static void *latency(void *cookie)
 
 			if (!(finished || warmup) && need_histo())
 				add_histogram(histogram_avg, dt);
+
+			if (!(finished || warmup)) {
+				post_extra_sample(dt, (test_loops - 1) * nsamples + count);
+			}
 		}
 
 		if (!warmup) {
@@ -612,6 +729,9 @@ void application_usage(void)
 		"-c <cpu>                        pin measuring task down to given CPU\n"
 		"-P <priority>                   task priority (test mode 0 and 1 only)\n"
 		"-b                              break upon mode switch\n"
+		"-e                              extra sample data, like PMC\n"
+		"-r                              random sample data counts\n"
+		"-m                              max check latency, if sampled > it, will save\n"
 		);
 }
 
@@ -646,7 +766,7 @@ int main(int argc, char *const *argv)
 	cpu_set_t cpus;
 	sigset_t mask;
 
-	while ((c = getopt(argc, argv, "g:hp:l:T:qH:B:sD:t:fc:P:b")) != EOF)
+	while ((c = getopt(argc, argv, "g:hp:l:T:qH:B:sD:t:fc:P:b:er:m:")) != EOF)
 		switch (c) {
 		case 'g':
 			do_gnuplot = strdup(optarg);
@@ -720,10 +840,24 @@ int main(int argc, char *const *argv)
 			stop_upon_switch = 1;
 			break;
 
+		//for extra sample feature
+		case 'e':
+			ignore_extra_sample = false;
+			break;
+
+		case 'r':
+			random_sample_count = atoi(optarg);
+			break;
+		
+		case 'm':
+			max_time_check = (uint32_t)atoi(optarg);
+			break;
+
 		default:
 			xenomai_usage();
 			exit(2);
 		}
+
 
 	if (!test_duration && quiet) {
 		warning("-q requires -T, ignoring -q");
@@ -789,6 +923,10 @@ int main(int argc, char *const *argv)
 			error(1, errno, "open sampler device (modprobe xeno_timerbench?)");
 	}
 
+	//for extra sample
+	default_pmc_cpu = cpu;
+	init_extra_sampling();
+
 	setup_sched_parameters(&tattr, 0);
 
 	ret = pthread_create(&display_task, &tattr, display, NULL);
@@ -816,7 +954,11 @@ int main(int argc, char *const *argv)
 	__STD(sigwait(&mask, &sig));
 	finished = 1;
 
-	cleanup();
+	//output extra samples
+	output_extra_sample();
+	
+    cleanup();
+
 
 	return 0;
 }

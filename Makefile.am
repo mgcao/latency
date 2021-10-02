@@ -4,7 +4,9 @@ CCLD = $(top_srcdir)/scripts/wrap-link.sh $(CC)
 
 test_PROGRAMS = latency
 
-latency_SOURCES = latency.c
+latency_SOURCES = latency.c msr.c post_pmc.c
+
+noinst_HEADERS = msr.h pmc.h
 
 latency_CPPFLAGS = 		\
 	$(XENO_USER_CFLAGS)	\
