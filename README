@@ -1,0 +1,14 @@
+
+except original parameters, add some to sample PMC data:
+
+    -e: to extra sample
+    -r: random sample counts
+    -m: max-time to check/sample
+
+
+for example:
+latency -c1 -T 3600 -p 1000 -B 1 -q -P 80 -H 10000 -e -r 300 -m 3000 -g 1_his.log > 1-out.log 2>&1
+
+it means:
+ -e -r : randomly sample 300 points PMC data
+ -m 3000 : if the test point latency > 3000ns, its PMC data will be sampled
