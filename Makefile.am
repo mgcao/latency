@@ -4,7 +4,7 @@ CCLD = $(top_srcdir)/scripts/wrap-link.sh $(CC)
 
 test_PROGRAMS = latency
 
-latency_SOURCES = latency.c msr.c post_pmc.c
+latency_SOURCES = latency.c msr.c post_pmc.c pmc_sample.c
 
 noinst_HEADERS = msr.h pmc.h
 

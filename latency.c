@@ -41,27 +41,13 @@
 #include <boilerplate/trace.h>
 #include <xenomai/init.h>
 
-#include "msr.h"
-#include "pmc.h"
+#include "pmc_sample.h"
 
 //add for extra info
-static bool ignore_extra_sample = true;
-static bool has_pmc_info = false;
-
-#define INFO_BUF_SIZE (128 * 1024U)
-#define INFO_BUF_SIZE_LIMIT  (INFO_BUF_SIZE - 256)
-static char extra_info_buf[INFO_BUF_SIZE];
-static uint32_t	buf_offset = 0;
-
-#define PMC_ON_CPU 1
-
-#define MAX_CHECK_TIME  10000 // ns, 10us by default
-
-static int default_pmc_cpu = PMC_ON_CPU;
-static uint32_t max_time_check = MAX_CHECK_TIME;
-static uint32_t random_sample_count = 0;
-static uint32_t random_sample_interval = 1000; //unit ms
-static uint64_t next_sample_cycle = 0;
+static bool ignore_sample_pmc = true;
+static uint32_t upper_time_check = 10000; // ns, 10us by default
+static uint32_t sample_pmc_count = 0;
+static uint32_t sample_pmc_interval = 1000; //unit ms
 
 pthread_t latency_task, display_task;
 
@@ -114,94 +100,6 @@ int do_histogram = 0, do_stats = 0, finished = 0;
 int bucketsize = 1000;		/* default = 1000ns, -B <size> to override */
 
 #define need_histo() (do_histogram || do_stats || do_gnuplot)
-
-//for extra info sampling
-static void init_extra_sampling(void)
-{
-	if (ignore_extra_sample)
-		return;
-
-	//current set fixed cpu PMC_ON_CPU
-	has_pmc_info = pmc_init();
-	if (!has_pmc_info) {
-		perror("PMU can't count!\n");
-	}
-
-	//start counter
-	if (has_pmc_info) {	
-		pmc_start_counting(default_pmc_cpu);
-		printf("Post PMC build, note: need run PMC script first!\n");
-	}
-
-	buf_offset = 0;
-	
-	//for ramdom sampling
-	if (random_sample_count > 0) {
-		if (test_duration > 0) {
-			long samples_1s = (long long)ONE_BILLION / period_ns;
-			random_sample_interval = (long long)(test_duration * samples_1s) / random_sample_count;
-		}
-	} 
-
-	printf("random_sample_count: %d, interval: %d cycles, max-check: %dns\n", random_sample_count,
-        random_sample_interval, max_time_check);
-}
-
-static void pre_extra_sample(void)
-{
-	if (ignore_extra_sample)
-		return;
-
-	if (has_pmc_info) {
-		pmc_pre_read();
-	}
-}
-
-static void post_extra_sample(uint64_t latency, uint64_t cycles)
-{
-	if (ignore_extra_sample)
-		return;
-
-	if (has_pmc_info) {
-	
-		pmc_post_read();
-
-        //for debug
-        //printf("next: %ld, cycles:%ld\n", next_sample_cycle, cycles);
-
-		//for ramdom sample,  if random sample set, ingore min/max setting
-		if ((random_sample_count > 0) && (next_sample_cycle == cycles) && (buf_offset < INFO_BUF_SIZE_LIMIT)) {
-
-			int size = pmc_dump_delta_info(extra_info_buf + buf_offset, cycles, latency);
-			buf_offset += size;
-			next_sample_cycle += random_sample_interval;
-	
-		} else if ((latency > max_time_check) && (buf_offset < INFO_BUF_SIZE_LIMIT)) {
-
-			int size = pmc_dump_delta_info(extra_info_buf + buf_offset, cycles, latency);
-			buf_offset += size;
-		} 
-	}
-}
-
-static void output_extra_sample(void)
-{
-	if (has_pmc_info) {	
-		pmc_stop_counting(default_pmc_cpu);
-	}
-
-	if (buf_offset >= INFO_BUF_SIZE_LIMIT) {
-		int size = sprintf(extra_info_buf + buf_offset, "\n!too much samples saved, buffer to overflow!!!\n");
-		buf_offset += size;
-	}
-
-	if (buf_offset > 0) {
-		fputs(extra_info_buf, stdout);
-		fputs("\n", stdout);
-	} else {
-        fputs("no extra sampled data\n", stdout);
-    }
-}
 
 static inline void add_histogram(int32_t *histogram, int32_t addval)
 {
@@ -842,15 +740,15 @@ int main(int argc, char *const *argv)
 
 		//for extra sample feature
 		case 'e':
-			ignore_extra_sample = false;
+			ignore_sample_pmc = false;
 			break;
 
 		case 'r':
-			random_sample_count = atoi(optarg);
+			sample_pmc_count = atoi(optarg);
 			break;
 		
 		case 'm':
-			max_time_check = (uint32_t)atoi(optarg);
+			upper_time_check = (uint32_t)atoi(optarg);
 			break;
 
 		default:
@@ -924,8 +822,17 @@ int main(int argc, char *const *argv)
 	}
 
 	//for extra sample
-	default_pmc_cpu = cpu;
-	init_extra_sampling();
+	//for ramdom sampling
+	if (!ignore_sample_pmc && (sample_pmc_count > 0)) {
+		if (test_duration > 0) {
+			long samples_1s = (long long)ONE_BILLION / period_ns;
+			sample_pmc_interval = (long long)(test_duration * samples_1s) / sample_pmc_count;
+		}
+	} 
+
+	if (!ignore_sample_pmc) {
+		init_extra_sampling(cpu, sample_pmc_count, sample_pmc_interval, upper_time_check);
+	}
 
 	setup_sched_parameters(&tattr, 0);
 
