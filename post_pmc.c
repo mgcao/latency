@@ -111,15 +111,30 @@ void pmc_stop_counting(int cpu)
 }
 
 #define RDPMC_PATH "/sys/devices/cpu/rdpmc"
+#define RDPMC_CORE_PATH "/sys/devices/cpu_core/rdpmc"
+#define RDPMC_ATOM_PATH "/sys/devices/cpu_atom/rdpmc"
 
 bool pmc_init(void)
 {
     //emable rdpmc in userland
-	int ret = system("echo 2 > " RDPMC_PATH);
+	int ret = 0;
+    
+    if (access(RDPMC_PATH, 0) == 0) {
+        ret = system("echo 2 > " RDPMC_PATH);
+    }
+
+    if (access(RDPMC_CORE_PATH, 0) == 0) {
+        ret = system("echo 2 > " RDPMC_CORE_PATH);
+    }
+
+    if (access(RDPMC_ATOM_PATH, 0) == 0) {
+        ret = system("echo 2 > " RDPMC_ATOM_PATH);
+    }
 
 	//printf("pmc_init system ret=%d\n", ret);
 	if (ret != 0) {
-		fprintf(stderr, RDPMC_PATH " set failed, please check! need expose it from kernel!\n");
+		fprintf(stderr, RDPMC_PATH " or " RDPMC_CORE_PATH " or " RDPMC_ATOM_PATH " \n "
+                " set failed, please check! need expose it from kernel!\n");
 		return false;
 	}
 
